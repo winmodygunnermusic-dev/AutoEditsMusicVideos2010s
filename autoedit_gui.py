@@ -1,17 +1,15 @@
 import json
-import os
 import random
 import shlex
 import subprocess
 import tempfile
 import threading
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".m4v"}
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
@@ -23,6 +21,7 @@ class EditConfig:
     ffprobe_path: str = "ffprobe"
     output_file: str = "output_autoedit.mp4"
     recursive_scan: bool = True
+
     min_clip_sec: float = 1.5
     max_clip_sec: float = 4.5
     total_clips: int = 120
@@ -30,25 +29,37 @@ class EditConfig:
     fps: int = 30
     crf: int = 20
     random_seed: str = ""
+
     transition_mode: str = "Cut"
-    transition_sec: float = 0.3
+    transition_sec: float = 0.30
+    transition_fx: str = "Fade"
+
     dance_energy: int = 50
     beat_preset: str = "Auto"
+    beat_sync: bool = True
+    beat_strength: int = 60
+
     audio_mode: str = "Random one song"
     remix_mode: str = "Original"
     bpm_fallback: int = 128
     instant_vfx: bool = False
     draft_mode: bool = False
+
     intro_count: int = 1
     outro_count: int = 1
+
     speed_ramp: bool = True
     loop_chance: int = 15
     reverse_chance: int = 10
     stutter_chance: int = 8
+
     trailer_mode: str = "Off"
     branding_logo: str = ""
     branding_opacity: int = 70
+
     remix_style: str = "Beat remix"
+    sfx_mode: str = "Random one"
+    sfx_concat_count: int = 6
 
 
 class AutoEditGUI:
@@ -57,6 +68,7 @@ class AutoEditGUI:
         self.mode = mode
         self.root.title("AutoEdits Music Videos 2010s - Super Deluxe GUI")
         self.config = EditConfig()
+
         self.video_files: List[str] = []
         self.video_folders: List[str] = []
         self.audio_files: List[str] = []
@@ -64,147 +76,167 @@ class AutoEditGUI:
         self.sfx_files: List[str] = []
         self.intro_files: List[str] = []
         self.outro_files: List[str] = []
-        self.log_var = tk.StringVar(value="Ready")
+
         self.vars: Dict[str, tk.Variable] = {}
+        self.pool_listboxes: Dict[str, tk.Listbox] = {}
+        self.log_var = tk.StringVar(value="Ready")
 
         self._build_ui()
 
     def _build_ui(self):
-        frame = ttk.Frame(self.root, padding=10)
-        frame.pack(fill="both", expand=True)
+        root_frame = ttk.Frame(self.root, padding=10)
+        root_frame.pack(fill="both", expand=True)
 
-        top = ttk.Frame(frame)
-        top.pack(fill="x")
-        ttk.Button(top, text="Save preset JSON", command=self.save_preset).pack(side="left", padx=3)
-        ttk.Button(top, text="Load preset JSON", command=self.load_preset).pack(side="left", padx=3)
-        ttk.Button(top, text="Run Auto-Edit", command=self.run_async).pack(side="right", padx=3)
+        header = ttk.Frame(root_frame)
+        header.pack(fill="x")
+        ttk.Button(header, text="Save preset JSON", command=self.save_preset).pack(side="left", padx=3)
+        ttk.Button(header, text="Load preset JSON", command=self.load_preset).pack(side="left", padx=3)
+        ttk.Button(header, text="Run Auto-Edit", command=self.run_async).pack(side="right", padx=3)
 
-        paths = ttk.LabelFrame(frame, text="Tools + Output")
+        paths = ttk.LabelFrame(root_frame, text="Tools + Output")
         paths.pack(fill="x", pady=6)
         self._entry_row(paths, "FFmpeg", "ffmpeg_path", browse_exec=True)
         self._entry_row(paths, "FFprobe", "ffprobe_path", browse_exec=True)
         self._entry_row(paths, "Output video", "output_file", browse_save=True)
 
-        media = ttk.LabelFrame(frame, text="Media Pools")
+        media = ttk.LabelFrame(root_frame, text="Media Pools")
         media.pack(fill="both", expand=True, pady=6)
+        self._multi_pool(media, "video_files", "Video files", self.video_files, 0, 0, kinds=[("Video", VIDEO_EXTS)])
+        self._multi_pool(media, "video_folders", "Video folders", self.video_folders, 0, 1, folder=True)
+        self._multi_pool(media, "audio_files", "Audio sources", self.audio_files, 1, 0, kinds=[("Audio", AUDIO_EXTS)])
+        self._multi_pool(media, "music_files", "Music sources", self.music_files, 1, 1, kinds=[("Audio", AUDIO_EXTS)])
+        if self.mode != "small":
+            self._multi_pool(media, "sfx_files", "SFX sources", self.sfx_files, 2, 0, kinds=[("Audio", AUDIO_EXTS)])
+            self._multi_pool(media, "intro_files", "Intro assets", self.intro_files, 2, 1, kinds=[("Video", VIDEO_EXTS)])
+            self._multi_pool(media, "outro_files", "Outro assets", self.outro_files, 3, 0, kinds=[("Video", VIDEO_EXTS)])
+        media.columnconfigure(0, weight=1)
+        media.columnconfigure(1, weight=1)
 
-        self._multi_pool(media, "Video files", self.video_files, 0, 0, kinds=[("Video", VIDEO_EXTS)])
-        self._multi_pool(media, "Video folders", self.video_folders, 0, 1, folder=True)
-        self._multi_pool(media, "Audio sources", self.audio_files, 1, 0, kinds=[("Audio", AUDIO_EXTS)])
-        self._multi_pool(media, "Music sources", self.music_files, 1, 1, kinds=[("Audio", AUDIO_EXTS)])
+        settings = ttk.LabelFrame(root_frame, text="Generation Controls")
+        settings.pack(fill="x", pady=6)
+        self._controls(settings)
+
+        ttk.Label(root_frame, textvariable=self.log_var, foreground="navy").pack(anchor="w", pady=4)
+
+    def _controls(self, parent):
+        panel = ttk.Frame(parent)
+        panel.pack(fill="x", pady=4)
+
+        def add(r, c, label, key, default, widget="entry", values=None):
+            ttk.Label(panel, text=label).grid(row=r, column=c * 2, sticky="w", padx=3, pady=2)
+            if widget == "combo":
+                var = tk.StringVar(value=str(default))
+                ctl = ttk.Combobox(panel, textvariable=var, values=values or [], state="readonly", width=16)
+                ctl.grid(row=r, column=c * 2 + 1, sticky="we", padx=3, pady=2)
+            elif widget == "check":
+                var = tk.BooleanVar(value=bool(default))
+                ctl = ttk.Checkbutton(panel, variable=var)
+                ctl.grid(row=r, column=c * 2 + 1, sticky="w", padx=3, pady=2)
+            else:
+                var = tk.StringVar(value=str(default))
+                ctl = ttk.Entry(panel, textvariable=var, width=16)
+                ctl.grid(row=r, column=c * 2 + 1, sticky="we", padx=3, pady=2)
+            self.vars[key] = var
+
+        add(0, 0, "Min clip sec", "min_clip_sec", self.config.min_clip_sec)
+        add(0, 1, "Max clip sec", "max_clip_sec", self.config.max_clip_sec)
+        add(0, 2, "Total clips", "total_clips", self.config.total_clips)
+
+        add(1, 0, "Resolution", "resolution", self.config.resolution)
+        add(1, 1, "FPS", "fps", self.config.fps)
+        add(1, 2, "CRF", "crf", self.config.crf)
+
+        add(2, 0, "Random seed", "random_seed", self.config.random_seed)
+        add(2, 1, "Transition", "transition_mode", self.config.transition_mode, widget="combo", values=["Cut", "Fade"])
+        add(2, 2, "Transition sec", "transition_sec", self.config.transition_sec)
 
         if self.mode != "small":
-            self._multi_pool(media, "SFX sources", self.sfx_files, 2, 0, kinds=[("Audio", AUDIO_EXTS)])
-            self._multi_pool(media, "Intro assets", self.intro_files, 2, 1, kinds=[("Video", VIDEO_EXTS)])
-            self._multi_pool(media, "Outro assets", self.outro_files, 3, 0, kinds=[("Video", VIDEO_EXTS)])
+            add(3, 0, "Transition FX", "transition_fx", self.config.transition_fx, widget="combo", values=["Fade", "Glitch", "Warp", "RGB Split"])
+            add(3, 1, "Dance energy", "dance_energy", self.config.dance_energy)
+            add(3, 2, "Beat preset", "beat_preset", self.config.beat_preset, widget="combo", values=["Auto", "Soft", "Hard", "Off"])
 
-        for c in range(2):
-            media.columnconfigure(c, weight=1)
+            add(4, 0, "Beat sync", "beat_sync", self.config.beat_sync, widget="check")
+            add(4, 1, "Beat strength", "beat_strength", self.config.beat_strength)
+            add(4, 2, "BPM fallback", "bpm_fallback", self.config.bpm_fallback)
 
-        settings = ttk.LabelFrame(frame, text="Generation Controls")
-        settings.pack(fill="x", pady=6)
+            add(5, 0, "Audio mode", "audio_mode", self.config.audio_mode, widget="combo", values=["Random one song", "Combine all shuffled"])
+            add(5, 1, "Remix mode", "remix_mode", self.config.remix_mode, widget="combo", values=["Original", "Nightcore", "Slow Jam", "Hyper Dance"])
+            add(5, 2, "Instant VFX", "instant_vfx", self.config.instant_vfx, widget="check")
 
-        self._control_grid(settings)
+            add(6, 0, "10x draft mode", "draft_mode", self.config.draft_mode, widget="check")
+            add(6, 1, "Intro clips", "intro_count", self.config.intro_count)
+            add(6, 2, "Outro clips", "outro_count", self.config.outro_count)
 
-        ttk.Label(frame, textvariable=self.log_var, foreground="navy").pack(anchor="w", pady=4)
+            add(7, 0, "Speed ramp", "speed_ramp", self.config.speed_ramp, widget="check")
+            add(7, 1, "Loop %", "loop_chance", self.config.loop_chance)
+            add(7, 2, "Reverse %", "reverse_chance", self.config.reverse_chance)
+
+            add(8, 0, "Stutter %", "stutter_chance", self.config.stutter_chance)
+            add(8, 1, "Trailer mode", "trailer_mode", self.config.trailer_mode, widget="combo", values=["Off", "Trailer", "Teaser"])
+            add(8, 2, "Remix style", "remix_style", self.config.remix_style, widget="combo", values=["Chaos remix", "Beat remix", "Meme remix", "YouTube Poop", "TikTok", "AMV"])
+
+            add(9, 0, "Branding logo", "branding_logo", self.config.branding_logo)
+            add(9, 1, "Logo opacity", "branding_opacity", self.config.branding_opacity)
+            add(9, 2, "SFX mode", "sfx_mode", self.config.sfx_mode, widget="combo", values=["Off", "Random one", "Random concat bed"])
+            add(10, 0, "SFX concat clips", "sfx_concat_count", self.config.sfx_concat_count)
+
+        for col in [1, 3, 5]:
+            panel.columnconfigure(col, weight=1)
+
+        var = tk.BooleanVar(value=self.config.recursive_scan)
+        self.vars["recursive_scan"] = var
+        ttk.Checkbutton(parent, text="Recursive folder scan", variable=var).pack(anchor="w", padx=4, pady=2)
 
     def _entry_row(self, parent, label, key, browse_exec=False, browse_save=False):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=14).pack(side="left")
-        v = tk.StringVar(value=getattr(self.config, key))
-        self.vars[key] = v
-        ttk.Entry(row, textvariable=v).pack(side="left", fill="x", expand=True)
+        var = tk.StringVar(value=getattr(self.config, key))
+        self.vars[key] = var
+        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
         if browse_exec:
-            ttk.Button(row, text="Browse", command=lambda: self._browse_exe(v)).pack(side="left", padx=4)
+            ttk.Button(row, text="Browse", command=lambda: self._browse_exe(var)).pack(side="left", padx=4)
         if browse_save:
-            ttk.Button(row, text="Browse", command=lambda: self._browse_output(v)).pack(side="left", padx=4)
+            ttk.Button(row, text="Browse", command=lambda: self._browse_output(var)).pack(side="left", padx=4)
 
-    def _control_grid(self, parent):
-        rows = ttk.Frame(parent)
-        rows.pack(fill="x", pady=4)
+    def _multi_pool(self, parent, pool_name, title, store, row, col, kinds=None, folder=False):
+        frame = ttk.LabelFrame(parent, text=title)
+        frame.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
 
-        def add_field(r, c, text, key, default, width=10, widget="entry", values=None):
-            ttk.Label(rows, text=text).grid(row=r, column=c * 2, sticky="w", padx=3, pady=2)
-            if widget == "combo":
-                v = tk.StringVar(value=str(default))
-                cb = ttk.Combobox(rows, textvariable=v, values=values or [], width=width, state="readonly")
-                cb.grid(row=r, column=c * 2 + 1, sticky="we", padx=3, pady=2)
-            elif widget == "check":
-                v = tk.BooleanVar(value=bool(default))
-                ttk.Checkbutton(rows, variable=v).grid(row=r, column=c * 2 + 1, sticky="w", padx=3, pady=2)
-            else:
-                v = tk.StringVar(value=str(default))
-                ttk.Entry(rows, textvariable=v, width=width).grid(row=r, column=c * 2 + 1, sticky="we", padx=3, pady=2)
-            self.vars[key] = v
-
-        add_field(0, 0, "Min clip sec", "min_clip_sec", self.config.min_clip_sec)
-        add_field(0, 1, "Max clip sec", "max_clip_sec", self.config.max_clip_sec)
-        add_field(0, 2, "Total clips", "total_clips", self.config.total_clips)
-        add_field(1, 0, "Resolution", "resolution", self.config.resolution)
-        add_field(1, 1, "FPS", "fps", self.config.fps)
-        add_field(1, 2, "CRF", "crf", self.config.crf)
-        add_field(2, 0, "Random seed", "random_seed", self.config.random_seed)
-        add_field(2, 1, "Transition", "transition_mode", self.config.transition_mode, widget="combo", values=["Cut", "Fade"])
-        add_field(2, 2, "Transition sec", "transition_sec", self.config.transition_sec)
-        if self.mode != "small":
-            add_field(3, 0, "Dance energy 0-100", "dance_energy", self.config.dance_energy)
-            add_field(3, 1, "Beat preset", "beat_preset", self.config.beat_preset, widget="combo", values=["Auto", "Soft", "Hard", "Off"])
-            add_field(3, 2, "Remix mode", "remix_mode", self.config.remix_mode, widget="combo", values=["Original", "Nightcore", "Slow Jam", "Hyper Dance"])
-            add_field(4, 0, "Audio mode", "audio_mode", self.config.audio_mode, widget="combo", values=["Random one song", "Combine all shuffled"])
-            add_field(4, 1, "BPM fallback", "bpm_fallback", self.config.bpm_fallback)
-            add_field(4, 2, "Instant VFX", "instant_vfx", self.config.instant_vfx, widget="check")
-            add_field(5, 0, "10x draft mode", "draft_mode", self.config.draft_mode, widget="check")
-            add_field(5, 1, "Intro clips", "intro_count", self.config.intro_count)
-            add_field(5, 2, "Outro clips", "outro_count", self.config.outro_count)
-            add_field(6, 0, "Speed ramp", "speed_ramp", self.config.speed_ramp, widget="check")
-            add_field(6, 1, "Loop %", "loop_chance", self.config.loop_chance)
-            add_field(6, 2, "Reverse %", "reverse_chance", self.config.reverse_chance)
-            add_field(7, 0, "Stutter %", "stutter_chance", self.config.stutter_chance)
-            add_field(7, 1, "Trailer mode", "trailer_mode", self.config.trailer_mode, widget="combo", values=["Off", "Trailer", "Teaser"])
-            add_field(7, 2, "Remix style", "remix_style", self.config.remix_style, widget="combo", values=["Chaos remix", "Beat remix", "Meme remix", "YouTube Poop", "TikTok", "AMV"])
-            add_field(8, 0, "Branding logo", "branding_logo", self.config.branding_logo)
-            add_field(8, 1, "Logo opacity", "branding_opacity", self.config.branding_opacity)
-
-        rows.columnconfigure(1, weight=1)
-        rows.columnconfigure(3, weight=1)
-        rows.columnconfigure(5, weight=1)
-
-        rv = tk.BooleanVar(value=self.config.recursive_scan)
-        self.vars["recursive_scan"] = rv
-        ttk.Checkbutton(parent, text="Recursive folder scan", variable=rv).pack(anchor="w", padx=4, pady=2)
-
-    def _multi_pool(self, parent, title, store, row, col, kinds=None, folder=False):
-        box = ttk.LabelFrame(parent, text=title)
-        box.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
-        lb = tk.Listbox(box, height=4)
+        lb = tk.Listbox(frame, height=4)
         lb.pack(fill="both", expand=True, padx=3, pady=3)
+        self.pool_listboxes[pool_name] = lb
 
-        btns = ttk.Frame(box)
-        btns.pack(fill="x", padx=3, pady=2)
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", padx=3, pady=2)
 
         def add_items():
             if folder:
                 p = filedialog.askdirectory()
-                if p:
+                if p and p not in store:
                     store.append(p)
                     lb.insert("end", p)
                 return
-            patterns = [(k, " ".join([f"*{e}" for e in exts])) for k, exts in (kinds or [])]
+            patterns = [(k, " ".join([f"*{x}" for x in exts])) for k, exts in (kinds or [])]
             files = filedialog.askopenfilenames(filetypes=patterns or [("All", "*.*")])
-            for f in files:
-                if f not in store:
-                    store.append(f)
-                    lb.insert("end", f)
+            for p in files:
+                if p not in store:
+                    store.append(p)
+                    lb.insert("end", p)
 
-        def remove_selected():
+        def remove_sel():
             for idx in reversed(lb.curselection()):
                 store.pop(idx)
                 lb.delete(idx)
 
-        ttk.Button(btns, text="Add", command=add_items).pack(side="left", padx=2)
-        ttk.Button(btns, text="Remove", command=remove_selected).pack(side="left", padx=2)
-        ttk.Button(btns, text="Clear", command=lambda: (store.clear(), lb.delete(0, "end"))).pack(side="left", padx=2)
+        ttk.Button(buttons, text="Add", command=add_items).pack(side="left", padx=2)
+        ttk.Button(buttons, text="Remove", command=remove_sel).pack(side="left", padx=2)
+        ttk.Button(buttons, text="Clear", command=lambda: self._clear_pool(lb, store)).pack(side="left", padx=2)
+
+    @staticmethod
+    def _clear_pool(lb: tk.Listbox, store: List[str]):
+        store.clear()
+        lb.delete(0, "end")
 
     def _browse_exe(self, var):
         p = filedialog.askopenfilename()
@@ -219,38 +251,53 @@ class AutoEditGUI:
     def _sync_config(self):
         c = self.config
 
-        def to_bool(k):
-            v = self.vars[k]
-            return bool(v.get()) if isinstance(v, tk.BooleanVar) else str(v.get()).strip().lower() in {"1", "true", "yes", "on"}
+        def as_bool(key):
+            var = self.vars[key]
+            if isinstance(var, tk.BooleanVar):
+                return bool(var.get())
+            return str(var.get()).strip().lower() in {"1", "true", "yes", "on"}
 
-        c.ffmpeg_path = self.vars["ffmpeg_path"].get().strip() or "ffmpeg"
-        c.ffprobe_path = self.vars["ffprobe_path"].get().strip() or "ffprobe"
-        c.output_file = self.vars["output_file"].get().strip() or "output_autoedit.mp4"
-        c.recursive_scan = to_bool("recursive_scan")
-        c.min_clip_sec = float(self.vars["min_clip_sec"].get())
-        c.max_clip_sec = float(self.vars["max_clip_sec"].get())
-        c.total_clips = int(self.vars["total_clips"].get())
-        c.resolution = self.vars["resolution"].get().strip()
-        c.fps = int(self.vars["fps"].get())
-        c.crf = int(self.vars["crf"].get())
-        c.random_seed = self.vars["random_seed"].get().strip()
-        c.transition_mode = self.vars["transition_mode"].get().strip()
-        c.transition_sec = float(self.vars["transition_sec"].get())
+        def parse_value(cur, key):
+            if key not in self.vars:
+                return cur
+            raw = self.vars[key].get()
+            if isinstance(cur, bool):
+                return as_bool(key)
+            if isinstance(cur, int):
+                return int(raw)
+            if isinstance(cur, float):
+                return float(raw)
+            return raw
 
-        for k in [
-            "dance_energy", "beat_preset", "audio_mode", "remix_mode", "bpm_fallback", "instant_vfx", "draft_mode",
-            "intro_count", "outro_count", "speed_ramp", "loop_chance", "reverse_chance", "stutter_chance",
-            "trailer_mode", "branding_logo", "branding_opacity", "remix_style",
-        ]:
-            if k in self.vars:
-                val = self.vars[k].get()
-                cur = getattr(c, k)
-                if isinstance(cur, bool):
-                    setattr(c, k, bool(val))
-                elif isinstance(cur, int):
-                    setattr(c, k, int(val))
-                else:
-                    setattr(c, k, val)
+        for key in asdict(c).keys():
+            setattr(c, key, parse_value(getattr(c, key), key))
+
+        if c.min_clip_sec <= 0 or c.max_clip_sec <= 0:
+            raise ValueError("Clip durations must be positive.")
+        if c.max_clip_sec < c.min_clip_sec:
+            raise ValueError("Max clip sec must be >= min clip sec.")
+        if c.total_clips <= 0:
+            raise ValueError("Total clips must be > 0.")
+        if c.fps <= 0 or c.crf < 0:
+            raise ValueError("FPS must be >0 and CRF must be >=0.")
+
+    def _refresh_all_listboxes(self):
+        mapping = {
+            "video_files": self.video_files,
+            "video_folders": self.video_folders,
+            "audio_files": self.audio_files,
+            "music_files": self.music_files,
+            "sfx_files": self.sfx_files,
+            "intro_files": self.intro_files,
+            "outro_files": self.outro_files,
+        }
+        for name, items in mapping.items():
+            lb = self.pool_listboxes.get(name)
+            if not lb:
+                continue
+            lb.delete(0, "end")
+            for item in items:
+                lb.insert("end", item)
 
     def save_preset(self):
         self._sync_config()
@@ -276,188 +323,357 @@ class AutoEditGUI:
         if not p:
             return
         with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        cfg = data.get("config", {})
-        for k, v in cfg.items():
-            if k in self.vars:
-                self.vars[k].set(v)
-            if hasattr(self.config, k):
-                setattr(self.config, k, v)
-        for key in ["video_files", "video_folders", "audio_files", "music_files", "sfx_files", "intro_files", "outro_files"]:
-            setattr(self, key, data.get(key, []))
+            payload = json.load(f)
+
+        for key, value in payload.get("config", {}).items():
+            if key in self.vars:
+                self.vars[key].set(value)
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+
+        for name in ["video_files", "video_folders", "audio_files", "music_files", "sfx_files", "intro_files", "outro_files"]:
+            setattr(self, name, list(payload.get(name, [])))
+
+        self._refresh_all_listboxes()
         self.log_var.set(f"Preset loaded: {p}")
 
     def run_async(self):
         try:
             self._sync_config()
         except Exception as exc:
-            messagebox.showerror("Invalid values", f"Please fix settings: {exc}")
+            messagebox.showerror("Invalid settings", str(exc))
             return
-        t = threading.Thread(target=self._run_edit, daemon=True)
-        t.start()
+        threading.Thread(target=self._run_edit, daemon=True).start()
 
     def _collect_videos(self) -> List[str]:
-        vids = list(self.video_files)
+        videos = list(self.video_files)
         for folder in self.video_folders:
             p = Path(folder)
             if not p.exists():
                 continue
-            iterator = p.rglob("*") if self.config.recursive_scan else p.glob("*")
-            for f in iterator:
-                if f.is_file() and f.suffix.lower() in VIDEO_EXTS:
-                    vids.append(str(f))
-        return sorted(set(vids))
+            globber = p.rglob("*") if self.config.recursive_scan else p.glob("*")
+            for file_path in globber:
+                if file_path.is_file() and file_path.suffix.lower() in VIDEO_EXTS:
+                    videos.append(str(file_path))
+        return sorted(set(videos))
 
-    def _probe_duration(self, file_path: str) -> float:
-        cmd = [self.config.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-        out = subprocess.check_output(cmd, text=True).strip()
-        return float(out)
+    def _probe_duration(self, media_path: str) -> float:
+        cmd = [
+            self.config.ffprobe_path,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            media_path,
+        ]
+        return float(subprocess.check_output(cmd, text=True).strip())
 
-    def _probe_tbpm(self, file_path: str) -> Optional[float]:
-        cmd = [self.config.ffprobe_path, "-v", "error", "-show_entries", "format_tags=TBPM", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+    def _probe_tbpm(self, media_path: str) -> Optional[float]:
+        cmd = [
+            self.config.ffprobe_path,
+            "-v",
+            "error",
+            "-show_entries",
+            "format_tags=TBPM",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            media_path,
+        ]
         try:
-            out = subprocess.check_output(cmd, text=True).strip()
-            return float(out) if out else None
+            raw = subprocess.check_output(cmd, text=True).strip()
+            return float(raw) if raw else None
         except Exception:
             return None
 
     def _run(self, cmd: List[str]):
-        self.log_var.set("Running: " + " ".join(shlex.quote(x) for x in cmd[:8]) + (" ..." if len(cmd) > 8 else ""))
+        shown = " ".join(shlex.quote(x) for x in cmd[:8])
+        self.log_var.set(f"Running: {shown}{' ...' if len(cmd) > 8 else ''}")
         subprocess.check_call(cmd)
+
+    def _validate_tools(self):
+        self._run([self.config.ffmpeg_path, "-version"])
+        self._run([self.config.ffprobe_path, "-version"])
+
+    @staticmethod
+    def _write_concat_list(path: Path, files: List[Path]):
+        with open(path, "w", encoding="utf-8") as f:
+            for fp in files:
+                clean = str(fp).replace("'", "'\\''")
+                f.write(f"file '{clean}'\n")
+
+    def _style_adjustments(self):
+        style = self.config.remix_style
+        loop = self.config.loop_chance
+        rev = self.config.reverse_chance
+        stutter = self.config.stutter_chance
+        if style == "Chaos remix":
+            loop, rev, stutter = max(loop, 30), max(rev, 20), max(stutter, 22)
+        elif style == "Meme remix":
+            loop, rev, stutter = max(loop, 25), max(rev, 14), max(stutter, 30)
+        elif style == "YouTube Poop":
+            loop, rev, stutter = max(loop, 35), max(rev, 25), max(stutter, 35)
+        elif style == "TikTok":
+            loop, rev, stutter = max(loop, 16), max(rev, 9), max(stutter, 18)
+        elif style == "AMV":
+            loop, rev, stutter = max(loop, 10), max(rev, 6), max(stutter, 6)
+        return loop, rev, stutter
+
+    def _transition_fx_filters(self):
+        if self.config.transition_fx == "Glitch":
+            return ["noise=alls=16:allf=t", "hue=h=2*t"]
+        if self.config.transition_fx == "Warp":
+            return ["rotate=0.02*sin(2*PI*t)", "vignette"]
+        if self.config.transition_fx == "RGB Split":
+            return ["eq=saturation=1.45:contrast=1.08", "gblur=sigma=0.8"]
+        return []
+
+    def _build_audio_bed(self, temp: Path, songs: List[str], rng: random.Random) -> Path:
+        songs = list(songs)
+        rng.shuffle(songs)
+        if self.config.audio_mode == "Random one song":
+            songs = [rng.choice(songs)]
+
+        mix_file = temp / "music_mix.wav"
+
+        if len(songs) == 1:
+            song = songs[0]
+            bpm = self._probe_tbpm(song) or float(self.config.bpm_fallback)
+            atempo = 1.0
+            if self.config.remix_mode == "Nightcore":
+                atempo = 1.25
+            elif self.config.remix_mode == "Slow Jam":
+                atempo = 0.80
+            elif self.config.remix_mode == "Hyper Dance":
+                atempo = 1.35
+
+            if self.config.beat_preset == "Soft":
+                atempo *= 1.02
+            elif self.config.beat_preset == "Hard":
+                atempo *= 1.07
+            elif self.config.beat_preset == "Auto":
+                atempo *= 1.04 if bpm < 120 else 0.97
+
+            self._run([self.config.ffmpeg_path, "-y", "-i", song, "-filter:a", f"atempo={atempo:.3f}", str(mix_file)])
+            return mix_file
+
+        concat_file = temp / "music_concat.txt"
+        self._write_concat_list(concat_file, [Path(p) for p in songs])
+        self._run([
+            self.config.ffmpeg_path,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            str(mix_file),
+        ])
+        return mix_file
+
+    def _apply_sfx(self, temp: Path, base_audio: Path, rng: random.Random) -> Path:
+        if not self.sfx_files or self.config.sfx_mode == "Off":
+            return base_audio
+
+        if self.config.sfx_mode == "Random one":
+            sfx = rng.choice(self.sfx_files)
+            out = temp / "audio_sfx.wav"
+            self._run([
+                self.config.ffmpeg_path,
+                "-y",
+                "-i",
+                str(base_audio),
+                "-i",
+                sfx,
+                "-filter_complex",
+                "[1:a]volume=0.25[s];[0:a][s]amix=inputs=2:duration=first:dropout_transition=2",
+                str(out),
+            ])
+            return out
+
+        # Random concat bed
+        picks = [Path(rng.choice(self.sfx_files)) for _ in range(max(1, self.config.sfx_concat_count))]
+        sfx_concat = temp / "sfx_concat.txt"
+        self._write_concat_list(sfx_concat, picks)
+        sfx_bed = temp / "sfx_bed.wav"
+        self._run([
+            self.config.ffmpeg_path,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(sfx_concat),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            str(sfx_bed),
+        ])
+        out = temp / "audio_sfx_bed.wav"
+        self._run([
+            self.config.ffmpeg_path,
+            "-y",
+            "-i",
+            str(base_audio),
+            "-i",
+            str(sfx_bed),
+            "-filter_complex",
+            "[1:a]volume=0.20[s];[0:a][s]amix=inputs=2:duration=first:dropout_transition=2",
+            str(out),
+        ])
+        return out
 
     def _run_edit(self):
         try:
-            vids = self._collect_videos()
-            if not vids:
+            self._validate_tools()
+
+            videos = self._collect_videos()
+            if not videos:
                 raise RuntimeError("No video files found.")
             songs = self.music_files or self.audio_files
             if not songs:
                 raise RuntimeError("No music/audio sources provided.")
 
-            rng = random.Random()
-            if self.config.random_seed:
-                rng.seed(self.config.random_seed)
+            rng = random.Random(self.config.random_seed or None)
 
-            with tempfile.TemporaryDirectory(prefix="autoedit_") as td:
-                temp = Path(td)
+            with tempfile.TemporaryDirectory(prefix="autoedit_") as tmp:
+                temp = Path(tmp)
 
-                selected = []
-                intro = [f for f in self.intro_files if Path(f).exists()]
-                outro = [f for f in self.outro_files if Path(f).exists()]
-                body_count = max(1, self.config.total_clips - len(intro) - len(outro))
+                selected: List[str] = []
+                intros = [f for f in self.intro_files if Path(f).exists()]
+                outros = [f for f in self.outro_files if Path(f).exists()]
+                body = max(1, self.config.total_clips - min(self.config.intro_count, len(intros)) - min(self.config.outro_count, len(outros)))
                 if self.config.trailer_mode == "Trailer":
-                    body_count = min(body_count, 40)
+                    body = min(body, 40)
                 elif self.config.trailer_mode == "Teaser":
-                    body_count = min(body_count, 20)
+                    body = min(body, 20)
 
-                selected.extend(rng.sample(intro, k=min(self.config.intro_count, len(intro))))
-                for _ in range(body_count):
-                    selected.append(rng.choice(vids))
-                selected.extend(rng.sample(outro, k=min(self.config.outro_count, len(outro))))
+                selected.extend(rng.sample(intros, k=min(self.config.intro_count, len(intros))))
+                selected.extend(rng.choice(videos) for _ in range(body))
+                selected.extend(rng.sample(outros, k=min(self.config.outro_count, len(outros))))
 
-                clip_files = []
-                for i, src in enumerate(selected):
-                    dur = self._probe_duration(src)
+                song_for_beat = rng.choice(songs)
+                song_bpm = self._probe_tbpm(song_for_beat) or float(self.config.bpm_fallback)
+                beat_len = 60.0 / max(1.0, song_bpm)
+
+                loop_chance, rev_chance, stutter_chance = self._style_adjustments()
+                extra_fx = self._transition_fx_filters()
+                clip_paths: List[Path] = []
+
+                for idx, src in enumerate(selected):
+                    src_duration = self._probe_duration(src)
                     clip_len = rng.uniform(self.config.min_clip_sec, self.config.max_clip_sec)
-                    clip_len = min(clip_len, max(0.3, dur))
-                    start = 0.0 if dur <= clip_len else rng.uniform(0, max(0.0, dur - clip_len))
-                    out_clip = temp / f"clip_{i:04d}.mp4"
+                    if self.config.beat_sync and self.config.beat_preset != "Off":
+                        strength = max(0, min(100, self.config.beat_strength)) / 100.0
+                        base_beats = max(1, int(round((clip_len / beat_len) * max(0.3, strength))))
+                        clip_len = max(self.config.min_clip_sec, min(self.config.max_clip_sec, base_beats * beat_len))
+                    clip_len = min(clip_len, max(0.3, src_duration))
 
-                    vf = [f"scale={self.config.resolution}", f"fps={self.config.fps}"]
-                    energy = self.config.dance_energy / 100.0
+                    start = 0.0 if src_duration <= clip_len else rng.uniform(0, src_duration - clip_len)
+                    out_clip = temp / f"clip_{idx:05d}.mp4"
+
+                    filters = [f"scale={self.config.resolution}", f"fps={self.config.fps}"]
+                    energy = max(0, min(100, self.config.dance_energy)) / 100.0
                     if self.config.speed_ramp and rng.random() < 0.45:
-                        speed = rng.choice([0.75, 0.85, 1.15, 1.3])
-                        vf.append(f"setpts={1/speed:.4f}*PTS")
-                    if rng.randint(1, 100) <= self.config.reverse_chance:
-                        vf.append("reverse")
-                    if rng.randint(1, 100) <= self.config.loop_chance:
-                        vf.append("loop=2:1:0")
-                    if rng.randint(1, 100) <= self.config.stutter_chance:
-                        vf.append("tblend=all_mode=difference")
+                        speed = rng.choice([0.75, 0.85, 1.15, 1.30])
+                        filters.append(f"setpts={1/speed:.4f}*PTS")
+                    if rng.randint(1, 100) <= rev_chance:
+                        filters.append("reverse")
+                    if rng.randint(1, 100) <= loop_chance:
+                        filters.append("loop=loop=2:size=15:start=0")
+                    if rng.randint(1, 100) <= stutter_chance:
+                        filters.append("tblend=all_mode=difference")
                     if self.config.instant_vfx or self.config.remix_style in {"Chaos remix", "YouTube Poop", "TikTok"}:
-                        vf.append("noise=alls=12:allf=t")
-                        vf.append("unsharp=5:5:1.2:3:3:0.2")
+                        filters += ["noise=alls=10:allf=t", "unsharp=5:5:1.2:3:3:0.2"]
+                    filters += extra_fx
                     if self.config.transition_mode == "Fade":
-                        t = min(self.config.transition_sec, clip_len / 3)
-                        vf.append(f"fade=t=in:st=0:d={t}")
-                        vf.append(f"fade=t=out:st={max(0, clip_len - t):.3f}:d={t}")
+                        t = min(self.config.transition_sec, clip_len / 3.0)
+                        filters.append(f"fade=t=in:st=0:d={t}")
+                        filters.append(f"fade=t=out:st={max(0.0, clip_len - t):.3f}:d={t}")
                     if energy > 0:
-                        sat = 1 + 0.8 * energy
-                        con = 1 + 0.25 * energy
-                        vf.append(f"eq=saturation={sat:.2f}:contrast={con:.2f}")
-                    vf_str = ",".join(vf)
+                        filters.append(f"eq=saturation={1 + 0.8 * energy:.2f}:contrast={1 + 0.25 * energy:.2f}")
 
-                    preset = "ultrafast" if self.config.draft_mode else "medium"
-                    cmd = [
-                        self.config.ffmpeg_path, "-y", "-ss", f"{start:.3f}", "-t", f"{clip_len:.3f}", "-i", src,
-                        "-vf", vf_str, "-an", "-c:v", "libx264", "-preset", preset, "-crf", str(self.config.crf), str(out_clip)
-                    ]
-                    self._run(cmd)
-                    clip_files.append(out_clip)
+                    self._run([
+                        self.config.ffmpeg_path,
+                        "-y",
+                        "-ss",
+                        f"{start:.3f}",
+                        "-t",
+                        f"{clip_len:.3f}",
+                        "-i",
+                        src,
+                        "-vf",
+                        ",".join(filters),
+                        "-an",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast" if self.config.draft_mode else "medium",
+                        "-crf",
+                        str(self.config.crf),
+                        str(out_clip),
+                    ])
+                    clip_paths.append(out_clip)
 
-                list_txt = temp / "clips.txt"
-                with open(list_txt, "w", encoding="utf-8") as f:
-                    for c in clip_files:
-                        f.write(f"file '{c.as_posix()}'\n")
-
-                video_noaudio = temp / "video_noaudio.mp4"
+                clip_concat = temp / "clips_concat.txt"
+                self._write_concat_list(clip_concat, clip_paths)
+                cut_video = temp / "video_noaudio.mp4"
                 self._run([
-                    self.config.ffmpeg_path, "-y", "-f", "concat", "-safe", "0", "-i", str(list_txt),
-                    "-c:v", "libx264", "-preset", "ultrafast" if self.config.draft_mode else "medium",
-                    "-crf", str(self.config.crf), "-pix_fmt", "yuv420p", str(video_noaudio)
+                    self.config.ffmpeg_path,
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(clip_concat),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast" if self.config.draft_mode else "medium",
+                    "-crf",
+                    str(self.config.crf),
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(cut_video),
                 ])
 
-                song_list = list(songs)
-                rng.shuffle(song_list)
-                if self.config.audio_mode == "Random one song":
-                    song_list = [rng.choice(song_list)]
+                audio = self._build_audio_bed(temp, songs, rng)
+                audio = self._apply_sfx(temp, audio, rng)
 
-                mix_file = temp / "music_mix.wav"
-                if len(song_list) == 1:
-                    bpm = self._probe_tbpm(song_list[0]) or float(self.config.bpm_fallback)
-                    atempo = 1.0
-                    if self.config.remix_mode == "Nightcore":
-                        atempo = 1.25
-                    elif self.config.remix_mode == "Slow Jam":
-                        atempo = 0.8
-                    elif self.config.remix_mode == "Hyper Dance":
-                        atempo = 1.35
-                    if self.config.beat_preset == "Soft":
-                        atempo *= 1.02
-                    elif self.config.beat_preset == "Hard":
-                        atempo *= 1.07
-                    elif self.config.beat_preset == "Auto":
-                        atempo *= 1.04 if bpm < 120 else 0.97
-                    self._run([self.config.ffmpeg_path, "-y", "-i", song_list[0], "-filter:a", f"atempo={atempo:.3f}", str(mix_file)])
-                else:
-                    music_txt = temp / "music.txt"
-                    with open(music_txt, "w", encoding="utf-8") as f:
-                        for s in song_list:
-                            f.write(f"file '{Path(s).as_posix()}'\n")
-                    self._run([self.config.ffmpeg_path, "-y", "-f", "concat", "-safe", "0", "-i", str(music_txt), "-c", "copy", str(mix_file)])
-
-                final_audio = mix_file
-                if self.sfx_files:
-                    sfx_choice = rng.choice(self.sfx_files)
-                    sfx_mix = temp / "sfx_mix.wav"
-                    self._run([
-                        self.config.ffmpeg_path, "-y", "-i", str(mix_file), "-i", sfx_choice,
-                        "-filter_complex", "[1:a]volume=0.25[s];[0:a][s]amix=inputs=2:duration=first:dropout_transition=2",
-                        str(sfx_mix)
-                    ])
-                    final_audio = sfx_mix
-
-                overlay_args = []
+                output_cmd = [self.config.ffmpeg_path, "-y", "-i", str(cut_video), "-i", str(audio)]
                 logo = self.config.branding_logo.strip()
                 if logo and Path(logo).exists():
                     alpha = max(0.0, min(1.0, self.config.branding_opacity / 100.0))
-                    overlay_args = ["-i", logo, "-filter_complex", f"[1:v]format=rgba,colorchannelmixer=aa={alpha:.2f}[wm];[0:v][wm]overlay=W-w-20:H-h-20"]
-
-                out = self.config.output_file
-                cmd = [self.config.ffmpeg_path, "-y", "-i", str(video_noaudio), "-i", str(final_audio)]
-                cmd += overlay_args
-                cmd += ["-shortest", "-c:v", "libx264", "-preset", "ultrafast" if self.config.draft_mode else "medium", "-crf", str(self.config.crf), "-c:a", "aac", out]
-                self._run(cmd)
+                    output_cmd += [
+                        "-i",
+                        logo,
+                        "-filter_complex",
+                        f"[2:v]format=rgba,colorchannelmixer=aa={alpha:.2f}[wm];[0:v][wm]overlay=W-w-20:H-h-20",
+                    ]
+                output_cmd += [
+                    "-shortest",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast" if self.config.draft_mode else "medium",
+                    "-crf",
+                    str(self.config.crf),
+                    "-c:a",
+                    "aac",
+                    self.config.output_file,
+                ]
+                self._run(output_cmd)
 
             self.log_var.set(f"Done! Output: {self.config.output_file}")
             messagebox.showinfo("Auto-Edit Complete", f"Finished!\n{self.config.output_file}")
@@ -468,10 +684,7 @@ class AutoEditGUI:
 
 def run_app(mode: str = "deluxe"):
     root = tk.Tk()
-    if mode == "small":
-        root.geometry("1080x720")
-    else:
-        root.geometry("1280x900")
+    root.geometry("1080x720" if mode == "small" else "1280x900")
     AutoEditGUI(root, mode=mode)
     root.mainloop()
 
